@@ -1,0 +1,761 @@
+From 558e8cf1ad4736bea26df0ba4ca6faf216047a9d Mon Sep 17 00:00:00 2001
+From: SpacingBat3 <spacingbat3@gmail.com>
+Date: Tue, 12 May 2026 03:23:02 +0200
+Subject: [PATCH] Revert "Optimize resource upload in D3D11 (#48282)"
+
+This reverts commit 9ef1afd6d5f4229c1a45988d3b263a900c1044d0.
+---
+ crates/gpui/src/scene.rs                    |  63 +++--
+ crates/gpui_macos/src/metal_renderer.rs     |  59 ++---
+ crates/gpui_wgpu/src/wgpu_renderer.rs       |  27 +-
+ crates/gpui_windows/src/directx_renderer.rs | 266 ++++++--------------
+ 4 files changed, 160 insertions(+), 255 deletions(-)
+
+diff --git a/crates/gpui/src/scene.rs b/crates/gpui/src/scene.rs
+index ef37caa7b9..c21b721c26 100644
+--- a/crates/gpui/src/scene.rs
++++ b/crates/gpui/src/scene.rs
+@@ -155,22 +155,30 @@ impl Scene {
+         ),
+         allow(dead_code)
+     )]
+-    pub fn batches(&self) -> impl Iterator<Item = PrimitiveBatch> + '_ {
++    pub fn batches(&self) -> impl Iterator<Item = PrimitiveBatch<'_>> {
+         BatchIterator {
++            shadows: &self.shadows,
+             shadows_start: 0,
+             shadows_iter: self.shadows.iter().peekable(),
++            quads: &self.quads,
+             quads_start: 0,
+             quads_iter: self.quads.iter().peekable(),
++            paths: &self.paths,
+             paths_start: 0,
+             paths_iter: self.paths.iter().peekable(),
++            underlines: &self.underlines,
+             underlines_start: 0,
+             underlines_iter: self.underlines.iter().peekable(),
++            monochrome_sprites: &self.monochrome_sprites,
+             monochrome_sprites_start: 0,
+             monochrome_sprites_iter: self.monochrome_sprites.iter().peekable(),
++            subpixel_sprites: &self.subpixel_sprites,
+             subpixel_sprites_start: 0,
+             subpixel_sprites_iter: self.subpixel_sprites.iter().peekable(),
++            polychrome_sprites: &self.polychrome_sprites,
+             polychrome_sprites_start: 0,
+             polychrome_sprites_iter: self.polychrome_sprites.iter().peekable(),
++            surfaces: &self.surfaces,
+             surfaces_start: 0,
+             surfaces_iter: self.surfaces.iter().peekable(),
+         }
+@@ -253,26 +261,34 @@ impl Primitive {
+     allow(dead_code)
+ )]
+ struct BatchIterator<'a> {
++    shadows: &'a [Shadow],
+     shadows_start: usize,
+     shadows_iter: Peekable<slice::Iter<'a, Shadow>>,
++    quads: &'a [Quad],
+     quads_start: usize,
+     quads_iter: Peekable<slice::Iter<'a, Quad>>,
++    paths: &'a [Path<ScaledPixels>],
+     paths_start: usize,
+     paths_iter: Peekable<slice::Iter<'a, Path<ScaledPixels>>>,
++    underlines: &'a [Underline],
+     underlines_start: usize,
+     underlines_iter: Peekable<slice::Iter<'a, Underline>>,
++    monochrome_sprites: &'a [MonochromeSprite],
+     monochrome_sprites_start: usize,
+     monochrome_sprites_iter: Peekable<slice::Iter<'a, MonochromeSprite>>,
++    subpixel_sprites: &'a [SubpixelSprite],
+     subpixel_sprites_start: usize,
+     subpixel_sprites_iter: Peekable<slice::Iter<'a, SubpixelSprite>>,
++    polychrome_sprites: &'a [PolychromeSprite],
+     polychrome_sprites_start: usize,
+     polychrome_sprites_iter: Peekable<slice::Iter<'a, PolychromeSprite>>,
++    surfaces: &'a [PaintSurface],
+     surfaces_start: usize,
+     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
+ }
+ 
+ impl<'a> Iterator for BatchIterator<'a> {
+-    type Item = PrimitiveBatch;
++    type Item = PrimitiveBatch<'a>;
+ 
+     fn next(&mut self) -> Option<Self::Item> {
+         let mut orders_and_kinds = [
+@@ -326,7 +342,9 @@ impl<'a> Iterator for BatchIterator<'a> {
+                     shadows_end += 1;
+                 }
+                 self.shadows_start = shadows_end;
+-                Some(PrimitiveBatch::Shadows(shadows_start..shadows_end))
++                Some(PrimitiveBatch::Shadows(
++                    &self.shadows[shadows_start..shadows_end],
++                ))
+             }
+             PrimitiveKind::Quad => {
+                 let quads_start = self.quads_start;
+@@ -340,7 +358,7 @@ impl<'a> Iterator for BatchIterator<'a> {
+                     quads_end += 1;
+                 }
+                 self.quads_start = quads_end;
+-                Some(PrimitiveBatch::Quads(quads_start..quads_end))
++                Some(PrimitiveBatch::Quads(&self.quads[quads_start..quads_end]))
+             }
+             PrimitiveKind::Path => {
+                 let paths_start = self.paths_start;
+@@ -354,7 +372,7 @@ impl<'a> Iterator for BatchIterator<'a> {
+                     paths_end += 1;
+                 }
+                 self.paths_start = paths_end;
+-                Some(PrimitiveBatch::Paths(paths_start..paths_end))
++                Some(PrimitiveBatch::Paths(&self.paths[paths_start..paths_end]))
+             }
+             PrimitiveKind::Underline => {
+                 let underlines_start = self.underlines_start;
+@@ -368,7 +386,9 @@ impl<'a> Iterator for BatchIterator<'a> {
+                     underlines_end += 1;
+                 }
+                 self.underlines_start = underlines_end;
+-                Some(PrimitiveBatch::Underlines(underlines_start..underlines_end))
++                Some(PrimitiveBatch::Underlines(
++                    &self.underlines[underlines_start..underlines_end],
++                ))
+             }
+             PrimitiveKind::MonochromeSprite => {
+                 let texture_id = self.monochrome_sprites_iter.peek().unwrap().tile.texture_id;
+@@ -388,7 +408,7 @@ impl<'a> Iterator for BatchIterator<'a> {
+                 self.monochrome_sprites_start = sprites_end;
+                 Some(PrimitiveBatch::MonochromeSprites {
+                     texture_id,
+-                    range: sprites_start..sprites_end,
++                    sprites: &self.monochrome_sprites[sprites_start..sprites_end],
+                 })
+             }
+             PrimitiveKind::SubpixelSprite => {
+@@ -409,13 +429,13 @@ impl<'a> Iterator for BatchIterator<'a> {
+                 self.subpixel_sprites_start = sprites_end;
+                 Some(PrimitiveBatch::SubpixelSprites {
+                     texture_id,
+-                    range: sprites_start..sprites_end,
++                    sprites: &self.subpixel_sprites[sprites_start..sprites_end],
+                 })
+             }
+             PrimitiveKind::PolychromeSprite => {
+                 let texture_id = self.polychrome_sprites_iter.peek().unwrap().tile.texture_id;
+                 let sprites_start = self.polychrome_sprites_start;
+-                let mut sprites_end = sprites_start + 1;
++                let mut sprites_end = self.polychrome_sprites_start + 1;
+                 self.polychrome_sprites_iter.next();
+                 while self
+                     .polychrome_sprites_iter
+@@ -430,7 +450,7 @@ impl<'a> Iterator for BatchIterator<'a> {
+                 self.polychrome_sprites_start = sprites_end;
+                 Some(PrimitiveBatch::PolychromeSprites {
+                     texture_id,
+-                    range: sprites_start..sprites_end,
++                    sprites: &self.polychrome_sprites[sprites_start..sprites_end],
+                 })
+             }
+             PrimitiveKind::Surface => {
+@@ -445,7 +465,9 @@ impl<'a> Iterator for BatchIterator<'a> {
+                     surfaces_end += 1;
+                 }
+                 self.surfaces_start = surfaces_end;
+-                Some(PrimitiveBatch::Surfaces(surfaces_start..surfaces_end))
++                Some(PrimitiveBatch::Surfaces(
++                    &self.surfaces[surfaces_start..surfaces_end],
++                ))
+             }
+         }
+     }
+@@ -459,26 +481,25 @@ impl<'a> Iterator for BatchIterator<'a> {
+     ),
+     allow(dead_code)
+ )]
+-#[allow(missing_docs)]
+-pub enum PrimitiveBatch {
+-    Shadows(Range<usize>),
+-    Quads(Range<usize>),
+-    Paths(Range<usize>),
+-    Underlines(Range<usize>),
++pub enum PrimitiveBatch<'a> {
++    Shadows(&'a [Shadow]),
++    Quads(&'a [Quad]),
++    Paths(&'a [Path<ScaledPixels>]),
++    Underlines(&'a [Underline]),
+     MonochromeSprites {
+         texture_id: AtlasTextureId,
+-        range: Range<usize>,
++        sprites: &'a [MonochromeSprite],
+     },
+     #[cfg_attr(target_os = "macos", allow(dead_code))]
+     SubpixelSprites {
+         texture_id: AtlasTextureId,
+-        range: Range<usize>,
++        sprites: &'a [SubpixelSprite],
+     },
+     PolychromeSprites {
+         texture_id: AtlasTextureId,
+-        range: Range<usize>,
++        sprites: &'a [PolychromeSprite],
+     },
+-    Surfaces(Range<usize>),
++    Surfaces(&'a [PaintSurface]),
+ }
+ 
+ #[derive(Default, Debug, Copy, Clone)]
+diff --git a/crates/gpui_macos/src/metal_renderer.rs b/crates/gpui_macos/src/metal_renderer.rs
+index 73b53ce6ea..7ff63b5ed5 100644
+--- a/crates/gpui_macos/src/metal_renderer.rs
++++ b/crates/gpui_macos/src/metal_renderer.rs
+@@ -763,22 +763,21 @@ impl MetalRenderer {
+ 
+         for batch in scene.batches() {
+             let ok = match batch {
+-                PrimitiveBatch::Shadows(range) => self.draw_shadows(
+-                    &scene.shadows[range],
++                PrimitiveBatch::Shadows(shadows) => self.draw_shadows(
++                    shadows,
+                     instance_buffer,
+                     &mut instance_offset,
+                     viewport_size,
+                     command_encoder,
+                 ),
+-                PrimitiveBatch::Quads(range) => self.draw_quads(
+-                    &scene.quads[range],
++                PrimitiveBatch::Quads(quads) => self.draw_quads(
++                    quads,
+                     instance_buffer,
+                     &mut instance_offset,
+                     viewport_size,
+                     command_encoder,
+                 ),
+-                PrimitiveBatch::Paths(range) => {
+-                    let paths = &scene.paths[range];
++                PrimitiveBatch::Paths(paths) => {
+                     command_encoder.end_encoding();
+ 
+                     let did_draw = self.draw_paths_to_intermediate(
+@@ -810,33 +809,37 @@ impl MetalRenderer {
+                         false
+                     }
+                 }
+-                PrimitiveBatch::Underlines(range) => self.draw_underlines(
+-                    &scene.underlines[range],
++                PrimitiveBatch::Underlines(underlines) => self.draw_underlines(
++                    underlines,
+                     instance_buffer,
+                     &mut instance_offset,
+                     viewport_size,
+                     command_encoder,
+                 ),
+-                PrimitiveBatch::MonochromeSprites { texture_id, range } => self
+-                    .draw_monochrome_sprites(
+-                        texture_id,
+-                        &scene.monochrome_sprites[range],
+-                        instance_buffer,
+-                        &mut instance_offset,
+-                        viewport_size,
+-                        command_encoder,
+-                    ),
+-                PrimitiveBatch::PolychromeSprites { texture_id, range } => self
+-                    .draw_polychrome_sprites(
+-                        texture_id,
+-                        &scene.polychrome_sprites[range],
+-                        instance_buffer,
+-                        &mut instance_offset,
+-                        viewport_size,
+-                        command_encoder,
+-                    ),
+-                PrimitiveBatch::Surfaces(range) => self.draw_surfaces(
+-                    &scene.surfaces[range],
++                PrimitiveBatch::MonochromeSprites {
++                    texture_id,
++                    sprites,
++                } => self.draw_monochrome_sprites(
++                    texture_id,
++                    sprites,
++                    instance_buffer,
++                    &mut instance_offset,
++                    viewport_size,
++                    command_encoder,
++                ),
++                PrimitiveBatch::PolychromeSprites {
++                    texture_id,
++                    sprites,
++                } => self.draw_polychrome_sprites(
++                    texture_id,
++                    sprites,
++                    instance_buffer,
++                    &mut instance_offset,
++                    viewport_size,
++                    command_encoder,
++                ),
++                PrimitiveBatch::Surfaces(surfaces) => self.draw_surfaces(
++                    surfaces,
+                     instance_buffer,
+                     &mut instance_offset,
+                     viewport_size,
+diff --git a/crates/gpui_wgpu/src/wgpu_renderer.rs b/crates/gpui_wgpu/src/wgpu_renderer.rs
+index 39b6f3f7bd..97afc9b7d6 100644
+--- a/crates/gpui_wgpu/src/wgpu_renderer.rs
++++ b/crates/gpui_wgpu/src/wgpu_renderer.rs
+@@ -1218,16 +1218,15 @@ impl WgpuRenderer {
+ 
+                 for batch in scene.batches() {
+                     let ok = match batch {
+-                        PrimitiveBatch::Quads(range) => {
+-                            self.draw_quads(&scene.quads[range], &mut instance_offset, &mut pass)
++                        PrimitiveBatch::Quads(quads) => {
++                            self.draw_quads(quads, &mut instance_offset, &mut pass)
+                         }
+-                        PrimitiveBatch::Shadows(range) => self.draw_shadows(
+-                            &scene.shadows[range],
++                        PrimitiveBatch::Shadows(shadows) => self.draw_shadows(
++                            shadows,
+                             &mut instance_offset,
+                             &mut pass,
+                         ),
+-                        PrimitiveBatch::Paths(range) => {
+-                            let paths = &scene.paths[range];
++                        PrimitiveBatch::Paths(paths) => {
+                             if paths.is_empty() {
+                                 continue;
+                             }
+@@ -1265,28 +1264,28 @@ impl WgpuRenderer {
+                                 false
+                             }
+                         }
+-                        PrimitiveBatch::Underlines(range) => self.draw_underlines(
+-                            &scene.underlines[range],
++                        PrimitiveBatch::Underlines(underlines) => self.draw_underlines(
++                            underlines,
+                             &mut instance_offset,
+                             &mut pass,
+                         ),
+-                        PrimitiveBatch::MonochromeSprites { texture_id, range } => self
++                        PrimitiveBatch::MonochromeSprites { texture_id, sprites } => self
+                             .draw_monochrome_sprites(
+-                                &scene.monochrome_sprites[range],
++                                sprites,
+                                 texture_id,
+                                 &mut instance_offset,
+                                 &mut pass,
+                             ),
+-                        PrimitiveBatch::SubpixelSprites { texture_id, range } => self
++                        PrimitiveBatch::SubpixelSprites { texture_id, sprites } => self
+                             .draw_subpixel_sprites(
+-                                &scene.subpixel_sprites[range],
++                                sprites,
+                                 texture_id,
+                                 &mut instance_offset,
+                                 &mut pass,
+                             ),
+-                        PrimitiveBatch::PolychromeSprites { texture_id, range } => self
++                        PrimitiveBatch::PolychromeSprites { texture_id, sprites } => self
+                             .draw_polychrome_sprites(
+-                                &scene.polychrome_sprites[range],
++                                sprites,
+                                 texture_id,
+                                 &mut instance_offset,
+                                 &mut pass,
+diff --git a/crates/gpui_windows/src/directx_renderer.rs b/crates/gpui_windows/src/directx_renderer.rs
+index 2955b23429..3c4384c1b4 100644
+--- a/crates/gpui_windows/src/directx_renderer.rs
++++ b/crates/gpui_windows/src/directx_renderer.rs
+@@ -312,29 +312,28 @@ impl DirectXRenderer {
+             WindowBackgroundAppearance::Opaque => [1.0f32; 4],
+             _ => [0.0f32; 4],
+         })?;
+-
+-        self.upload_scene_buffers(scene)?;
+-
+         for batch in scene.batches() {
+             match batch {
+-                PrimitiveBatch::Shadows(range) => self.draw_shadows(range.start, range.len()),
+-                PrimitiveBatch::Quads(range) => self.draw_quads(range.start, range.len()),
+-                PrimitiveBatch::Paths(range) => {
+-                    let paths = &scene.paths[range];
++                PrimitiveBatch::Shadows(shadows) => self.draw_shadows(shadows),
++                PrimitiveBatch::Quads(quads) => self.draw_quads(quads),
++                PrimitiveBatch::Paths(paths) => {
+                     self.draw_paths_to_intermediate(paths)?;
+                     self.draw_paths_from_intermediate(paths)
+                 }
+-                PrimitiveBatch::Underlines(range) => self.draw_underlines(range.start, range.len()),
+-                PrimitiveBatch::MonochromeSprites { texture_id, range } => {
+-                    self.draw_monochrome_sprites(texture_id, range.start, range.len())
+-                }
+-                PrimitiveBatch::SubpixelSprites { texture_id, range } => {
+-                    self.draw_subpixel_sprites(texture_id, range.start, range.len())
+-                }
+-                PrimitiveBatch::PolychromeSprites { texture_id, range } => {
+-                    self.draw_polychrome_sprites(texture_id, range.start, range.len())
+-                }
+-                PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
++                PrimitiveBatch::Underlines(underlines) => self.draw_underlines(underlines),
++                PrimitiveBatch::MonochromeSprites {
++                    texture_id,
++                    sprites,
++                } => self.draw_monochrome_sprites(texture_id, sprites),
++                PrimitiveBatch::SubpixelSprites {
++                    texture_id,
++                    sprites,
++                } => self.draw_subpixel_sprites(texture_id, sprites),
++                PrimitiveBatch::PolychromeSprites {
++                    texture_id,
++                    sprites,
++                } => self.draw_polychrome_sprites(texture_id, sprites),
++                PrimitiveBatch::Surfaces(surfaces) => self.draw_surfaces(surfaces),
+             }
+             .context(format!(
+                 "scene too large:\
+@@ -396,67 +395,17 @@ impl DirectXRenderer {
+         Ok(())
+     }
+ 
+-    fn upload_scene_buffers(&mut self, scene: &Scene) -> Result<()> {
+-        let devices = self.devices.as_ref().context("devices missing")?;
+-
+-        if !scene.shadows.is_empty() {
+-            self.pipelines.shadow_pipeline.update_buffer(
+-                &devices.device,
+-                &devices.device_context,
+-                &scene.shadows,
+-            )?;
+-        }
+-
+-        if !scene.quads.is_empty() {
+-            self.pipelines.quad_pipeline.update_buffer(
+-                &devices.device,
+-                &devices.device_context,
+-                &scene.quads,
+-            )?;
+-        }
+-
+-        if !scene.underlines.is_empty() {
+-            self.pipelines.underline_pipeline.update_buffer(
+-                &devices.device,
+-                &devices.device_context,
+-                &scene.underlines,
+-            )?;
+-        }
+-
+-        if !scene.monochrome_sprites.is_empty() {
+-            self.pipelines.mono_sprites.update_buffer(
+-                &devices.device,
+-                &devices.device_context,
+-                &scene.monochrome_sprites,
+-            )?;
+-        }
+-
+-        if !scene.subpixel_sprites.is_empty() {
+-            self.pipelines.subpixel_sprites.update_buffer(
+-                &devices.device,
+-                &devices.device_context,
+-                &scene.subpixel_sprites,
+-            )?;
+-        }
+-
+-        if !scene.polychrome_sprites.is_empty() {
+-            self.pipelines.poly_sprites.update_buffer(
+-                &devices.device,
+-                &devices.device_context,
+-                &scene.polychrome_sprites,
+-            )?;
+-        }
+-
+-        Ok(())
+-    }
+-
+-    fn draw_shadows(&mut self, start: usize, len: usize) -> Result<()> {
+-        if len == 0 {
++    fn draw_shadows(&mut self, shadows: &[Shadow]) -> Result<()> {
++        if shadows.is_empty() {
+             return Ok(());
+         }
+         let devices = self.devices.as_ref().context("devices missing")?;
+-        self.pipelines.shadow_pipeline.draw_range(
++        self.pipelines.shadow_pipeline.update_buffer(
+             &devices.device,
++            &devices.device_context,
++            shadows,
++        )?;
++        self.pipelines.shadow_pipeline.draw(
+             &devices.device_context,
+             slice::from_ref(
+                 &self
+@@ -466,19 +415,23 @@ impl DirectXRenderer {
+                     .viewport,
+             ),
+             slice::from_ref(&self.globals.global_params_buffer),
++            D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+             4,
+-            start as u32,
+-            len as u32,
++            shadows.len() as u32,
+         )
+     }
+ 
+-    fn draw_quads(&mut self, start: usize, len: usize) -> Result<()> {
+-        if len == 0 {
++    fn draw_quads(&mut self, quads: &[Quad]) -> Result<()> {
++        if quads.is_empty() {
+             return Ok(());
+         }
+         let devices = self.devices.as_ref().context("devices missing")?;
+-        self.pipelines.quad_pipeline.draw_range(
++        self.pipelines.quad_pipeline.update_buffer(
+             &devices.device,
++            &devices.device_context,
++            quads,
++        )?;
++        self.pipelines.quad_pipeline.draw(
+             &devices.device_context,
+             slice::from_ref(
+                 &self
+@@ -488,9 +441,9 @@ impl DirectXRenderer {
+                     .viewport,
+             ),
+             slice::from_ref(&self.globals.global_params_buffer),
++            D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+             4,
+-            start as u32,
+-            len as u32,
++            quads.len() as u32,
+         )
+     }
+ 
+@@ -605,92 +558,105 @@ impl DirectXRenderer {
+         )
+     }
+ 
+-    fn draw_underlines(&mut self, start: usize, len: usize) -> Result<()> {
+-        if len == 0 {
++    fn draw_underlines(&mut self, underlines: &[Underline]) -> Result<()> {
++        if underlines.is_empty() {
+             return Ok(());
+         }
+         let devices = self.devices.as_ref().context("devices missing")?;
+         let resources = self.resources.as_ref().context("resources missing")?;
+-        self.pipelines.underline_pipeline.draw_range(
++        self.pipelines.underline_pipeline.update_buffer(
+             &devices.device,
++            &devices.device_context,
++            underlines,
++        )?;
++        self.pipelines.underline_pipeline.draw(
+             &devices.device_context,
+             slice::from_ref(&resources.viewport),
+             slice::from_ref(&self.globals.global_params_buffer),
++            D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+             4,
+-            start as u32,
+-            len as u32,
++            underlines.len() as u32,
+         )
+     }
+ 
+     fn draw_monochrome_sprites(
+         &mut self,
+         texture_id: AtlasTextureId,
+-        start: usize,
+-        len: usize,
++        sprites: &[MonochromeSprite],
+     ) -> Result<()> {
+-        if len == 0 {
++        if sprites.is_empty() {
+             return Ok(());
+         }
+         let devices = self.devices.as_ref().context("devices missing")?;
+         let resources = self.resources.as_ref().context("resources missing")?;
+-        let texture_view = self.atlas.get_texture_view(texture_id);
+-        self.pipelines.mono_sprites.draw_range_with_texture(
++
++        self.pipelines.mono_sprites.update_buffer(
+             &devices.device,
++            &devices.device_context,
++            sprites,
++        )?;
++        let texture_view = self.atlas.get_texture_view(texture_id);
++        self.pipelines.mono_sprites.draw_with_texture(
+             &devices.device_context,
+             &texture_view,
+             slice::from_ref(&resources.viewport),
+             slice::from_ref(&self.globals.global_params_buffer),
+             slice::from_ref(&self.globals.sampler),
+-            start as u32,
+-            len as u32,
++            sprites.len() as u32,
+         )
+     }
+ 
+     fn draw_subpixel_sprites(
+         &mut self,
+         texture_id: AtlasTextureId,
+-        start: usize,
+-        len: usize,
++        sprites: &[SubpixelSprite],
+     ) -> Result<()> {
+-        if len == 0 {
++        if sprites.is_empty() {
+             return Ok(());
+         }
+         let devices = self.devices.as_ref().context("devices missing")?;
+         let resources = self.resources.as_ref().context("resources missing")?;
+-        let texture_view = self.atlas.get_texture_view(texture_id);
+-        self.pipelines.subpixel_sprites.draw_range_with_texture(
++
++        self.pipelines.subpixel_sprites.update_buffer(
+             &devices.device,
++            &devices.device_context,
++            &sprites,
++        )?;
++        let texture_view = self.atlas.get_texture_view(texture_id);
++        self.pipelines.subpixel_sprites.draw_with_texture(
+             &devices.device_context,
+             &texture_view,
+             slice::from_ref(&resources.viewport),
+             slice::from_ref(&self.globals.global_params_buffer),
+             slice::from_ref(&self.globals.sampler),
+-            start as u32,
+-            len as u32,
++            sprites.len() as u32,
+         )
+     }
+ 
+     fn draw_polychrome_sprites(
+         &mut self,
+         texture_id: AtlasTextureId,
+-        start: usize,
+-        len: usize,
++        sprites: &[PolychromeSprite],
+     ) -> Result<()> {
+-        if len == 0 {
++        if sprites.is_empty() {
+             return Ok(());
+         }
++
+         let devices = self.devices.as_ref().context("devices missing")?;
+         let resources = self.resources.as_ref().context("resources missing")?;
+-        let texture_view = self.atlas.get_texture_view(texture_id);
+-        self.pipelines.poly_sprites.draw_range_with_texture(
++        self.pipelines.poly_sprites.update_buffer(
+             &devices.device,
++            &devices.device_context,
++            sprites,
++        )?;
++        let texture_view = self.atlas.get_texture_view(texture_id);
++        self.pipelines.poly_sprites.draw_with_texture(
+             &devices.device_context,
+             &texture_view,
+             slice::from_ref(&resources.viewport),
+             slice::from_ref(&self.globals.global_params_buffer),
+             slice::from_ref(&self.globals.sampler),
+-            start as u32,
+-            len as u32,
++            sprites.len() as u32,
+         )
+     }
+ 
+@@ -1081,64 +1047,6 @@ impl<T> PipelineState<T> {
+         }
+         Ok(())
+     }
+-
+-    fn draw_range(
+-        &self,
+-        device: &ID3D11Device,
+-        device_context: &ID3D11DeviceContext,
+-        viewport: &[D3D11_VIEWPORT],
+-        global_params: &[Option<ID3D11Buffer>],
+-        vertex_count: u32,
+-        first_instance: u32,
+-        instance_count: u32,
+-    ) -> Result<()> {
+-        let view = create_buffer_view_range(device, &self.buffer, first_instance, instance_count)?;
+-        set_pipeline_state(
+-            device_context,
+-            slice::from_ref(&view),
+-            D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+-            viewport,
+-            &self.vertex,
+-            &self.fragment,
+-            global_params,
+-            &self.blend_state,
+-        );
+-        unsafe {
+-            device_context.DrawInstanced(vertex_count, instance_count, 0, 0);
+-        }
+-        Ok(())
+-    }
+-
+-    fn draw_range_with_texture(
+-        &self,
+-        device: &ID3D11Device,
+-        device_context: &ID3D11DeviceContext,
+-        texture: &[Option<ID3D11ShaderResourceView>],
+-        viewport: &[D3D11_VIEWPORT],
+-        global_params: &[Option<ID3D11Buffer>],
+-        sampler: &[Option<ID3D11SamplerState>],
+-        first_instance: u32,
+-        instance_count: u32,
+-    ) -> Result<()> {
+-        let view = create_buffer_view_range(device, &self.buffer, first_instance, instance_count)?;
+-        set_pipeline_state(
+-            device_context,
+-            slice::from_ref(&view),
+-            D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+-            viewport,
+-            &self.vertex,
+-            &self.fragment,
+-            global_params,
+-            &self.blend_state,
+-        );
+-        unsafe {
+-            device_context.PSSetSamplers(0, Some(sampler));
+-            device_context.VSSetShaderResources(0, Some(texture));
+-            device_context.PSSetShaderResources(0, Some(texture));
+-            device_context.DrawInstanced(4, instance_count, 0, 0);
+-        }
+-        Ok(())
+-    }
+ }
+ 
+ #[derive(Clone, Copy)]
+@@ -1499,32 +1407,6 @@ fn create_buffer_view(
+     Ok(view)
+ }
+ 
+-#[inline]
+-fn create_buffer_view_range(
+-    device: &ID3D11Device,
+-    buffer: &ID3D11Buffer,
+-    first_element: u32,
+-    num_elements: u32,
+-) -> Result<Option<ID3D11ShaderResourceView>> {
+-    let desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+-        Format: DXGI_FORMAT_UNKNOWN,
+-        ViewDimension: D3D11_SRV_DIMENSION_BUFFER,
+-        Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+-            Buffer: D3D11_BUFFER_SRV {
+-                Anonymous1: D3D11_BUFFER_SRV_0 {
+-                    FirstElement: first_element,
+-                },
+-                Anonymous2: D3D11_BUFFER_SRV_1 {
+-                    NumElements: num_elements,
+-                },
+-            },
+-        },
+-    };
+-    let mut view = None;
+-    unsafe { device.CreateShaderResourceView(buffer, Some(&desc), Some(&mut view)) }?;
+-    Ok(view)
+-}
+-
+ #[inline]
+ fn update_buffer<T>(
+     device_context: &ID3D11DeviceContext,
+-- 
+2.54.0
+
