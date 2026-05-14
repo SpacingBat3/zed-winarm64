@@ -40,6 +40,6 @@ jobs:
     - name: Upload a Build Artifact
       uses: actions/upload-artifact@v7.0.1
       with:
-        name: zed-${windows}-release
+        name: zed-windows-arm64-release-${{ inputs.ref }}
         path: target/release/*.exe
         compression-level: 9
